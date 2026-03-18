@@ -20,17 +20,23 @@ const db  = admin.firestore();
 const app = express();
 app.use(express.json());
 
-// ── FCM токен пользователя ────────────────────────────────
 async function getFcmToken(userId) {
   try {
     const doc = await db.collection("users").doc(userId).get();
-    return doc.exists ? (doc.data().fcmToken || null) : null;
-  } catch { return null; }
+    const token = doc.exists ? (doc.data().fcmToken || null) : null;
+    console.log(`[TOKEN] userId=${userId} -> ${token ? "FOUND" : "NULL"}`);
+    return token;
+  } catch(e) {
+    console.error(`[TOKEN ERROR] ${e.message}`);
+    return null;
+  }
 }
 
-// ── Отправить push ────────────────────────────────────────
 async function sendPush(token, title, body, data = {}) {
-  if (!token) { console.log(`⚠️ Нет токена для: ${title}`); return; }
+  if (!token) {
+    console.log(`[NO TOKEN] title=${title}`);
+    return;
+  }
   try {
     await admin.messaging().send({
       token,
@@ -38,17 +44,16 @@ async function sendPush(token, title, body, data = {}) {
       data,
       android: { priority: "high", notification: { sound: "default", channelId: "flaro_main" } }
     });
-    console.log(`✅ Push: ${title} → ${body}`);
+    console.log(`[PUSH OK] ${title} -> ${body}`);
   } catch (e) {
-    console.error(`❌ Ошибка push: ${e.message}`);
+    console.error(`[PUSH ERROR] ${e.message}`);
   }
 }
 
-// ── Слушатель: СООБЩЕНИЯ (collectionGroup) ────────────────
 let lastMsgTimestamps = {};
 
 function watchMessages() {
-  console.log("👂 Слушаем сообщения...");
+  console.log("[START] Watching messages...");
   db.collectionGroup("messages").onSnapshot(async (snapshot) => {
     for (const change of snapshot.docChanges()) {
       if (change.type !== "added") continue;
@@ -69,30 +74,29 @@ function watchMessages() {
       const receiverId = parts[0] === senderId ? parts[1] : parts[0];
 
       const senderDoc  = await db.collection("users").doc(senderId).get();
-      const senderName = senderDoc.exists ? (senderDoc.data().name || "Кто-то") : "Кто-то";
+      const senderName = senderDoc.exists ? (senderDoc.data().name || "Someone") : "Someone";
 
-      console.log(`📨 Сообщение от ${senderName} → ${receiverId}`);
+      console.log(`[MSG] from=${senderId}(${senderName}) to=${receiverId} chat=${chatPath}`);
       const token = await getFcmToken(receiverId);
-      await sendPush(token, senderName, msg.text || "Новое сообщение",
+      await sendPush(token, senderName, msg.text || "New message",
         { type: "message", senderId, chatId: chatPath });
     }
   }, (err) => {
-    console.error("❌ Ошибка слушателя сообщений:", err.message);
-    setTimeout(watchMessages, 5000); // переподключение
+    console.error(`[ERROR] messages listener: ${err.message}`);
+    setTimeout(watchMessages, 5000);
   });
 }
 
-// ── Слушатель: МЭТЧИ ─────────────────────────────────────
 let knownMatches       = new Set();
 let matchesInitialized = false;
 
 function watchMatches() {
-  console.log("👂 Слушаем мэтчи...");
+  console.log("[START] Watching matches...");
   db.collection("matches").onSnapshot(async (snapshot) => {
     if (!matchesInitialized) {
       snapshot.docs.forEach(doc => knownMatches.add(doc.id));
       matchesInitialized = true;
-      console.log(`📋 Загружено ${knownMatches.size} существующих мэтчей`);
+      console.log(`[MATCHES] loaded ${knownMatches.size} existing`);
       return;
     }
     for (const change of snapshot.docChanges()) {
@@ -109,33 +113,30 @@ function watchMatches() {
         db.collection("users").doc(uid1).get(),
         db.collection("users").doc(uid2).get()
       ]);
-      const name1 = doc1.exists ? (doc1.data().name || "Кто-то") : "Кто-то";
-      const name2 = doc2.exists ? (doc2.data().name || "Кто-то") : "Кто-то";
+      const name1 = doc1.exists ? (doc1.data().name || "Someone") : "Someone";
+      const name2 = doc2.exists ? (doc2.data().name || "Someone") : "Someone";
 
-      console.log(`💘 Новый мэтч: ${name1} + ${name2}`);
+      console.log(`[MATCH] ${name1} + ${name2}`);
       const [token1, token2] = await Promise.all([getFcmToken(uid1), getFcmToken(uid2)]);
-      await sendPush(token1, "🎉 Новый мэтч!", `Вы понравились друг другу с ${name2}!`, { type: "match", matchedUserId: uid2 });
-      await sendPush(token2, "🎉 Новый мэтч!", `Вы понравились друг другу с ${name1}!`, { type: "match", matchedUserId: uid1 });
+      await sendPush(token1, "New match!", `You matched with ${name2}!`, { type: "match", matchedUserId: uid2 });
+      await sendPush(token2, "New match!", `You matched with ${name1}!`, { type: "match", matchedUserId: uid1 });
     }
   }, (err) => {
-    console.error("❌ Ошибка слушателя мэтчей:", err.message);
+    console.error(`[ERROR] matches listener: ${err.message}`);
     setTimeout(() => { matchesInitialized = false; watchMatches(); }, 5000);
   });
 }
 
-// ── Слушатель: ЛАЙКИ (users/{id}/likes — collectionGroup) ─
-// Лайки хранятся в подколлекции users/{userId}/likes/{likedId}
 let knownLikes       = new Set();
 let likesInitialized = false;
 
 function watchLikes() {
-  console.log("👂 Слушаем лайки...");
-  // Используем collectionGroup для подколлекции likes
+  console.log("[START] Watching likes...");
   db.collectionGroup("likes").onSnapshot(async (snapshot) => {
     if (!likesInitialized) {
       snapshot.docs.forEach(doc => knownLikes.add(doc.ref.path));
       likesInitialized = true;
-      console.log(`📋 Загружено ${knownLikes.size} существующих лайков`);
+      console.log(`[LIKES] loaded ${knownLikes.size} existing`);
       return;
     }
     for (const change of snapshot.docChanges()) {
@@ -144,35 +145,31 @@ function watchLikes() {
       if (knownLikes.has(path)) continue;
       knownLikes.add(path);
 
-      // path = "users/{fromUserId}/likes/{toUserId}"
       const parts = path.split("/");
       if (parts.length < 4) continue;
-      const fromUserId = parts[1]; // кто лайкнул
-      const toUserId   = parts[3]; // кого лайкнули
+      const fromUserId = parts[1];
+      const toUserId   = parts[3];
 
       const fromDoc  = await db.collection("users").doc(fromUserId).get();
-      const fromName = fromDoc.exists ? (fromDoc.data().name || "Кто-то") : "Кто-то";
+      const fromName = fromDoc.exists ? (fromDoc.data().name || "Someone") : "Someone";
 
-      console.log(`❤️ Лайк от ${fromName} → ${toUserId}`);
+      console.log(`[LIKE] from=${fromUserId}(${fromName}) to=${toUserId}`);
       const token = await getFcmToken(toUserId);
-      await sendPush(token, "❤️ Новый лайк!", `${fromName} лайкнул(а) тебя!`,
-        { type: "like", fromUserId });
+      await sendPush(token, "New like!", `${fromName} liked you!`, { type: "like", fromUserId });
     }
   }, (err) => {
-    console.error("❌ Ошибка слушателя лайков:", err.message);
+    console.error(`[ERROR] likes listener: ${err.message}`);
     setTimeout(() => { likesInitialized = false; watchLikes(); }, 5000);
   });
 }
 
-// ── Health check ──────────────────────────────────────────
 app.get("/", (req, res) => {
   res.json({ status: "ok", service: "Flaro Push Server", uptime: process.uptime() });
 });
 
-// ── Запуск ────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Flaro Push Server на порту ${PORT}`);
+  console.log(`[SERVER] Flaro Push Server on port ${PORT}`);
   watchMessages();
   watchMatches();
   watchLikes();
