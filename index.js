@@ -76,14 +76,10 @@ async function watchMessages() {
       const senderDoc  = await db.collection("users").doc(senderId).get();
       const senderName = senderDoc.exists ? (senderDoc.data().name || "Кто-то") : "Кто-то";
 
-      const receiverDoc = await db.collection("users").doc(receiverId).get();
-      const isOnline    = receiverDoc.exists ? (receiverDoc.data().isOnline || false) : false;
-
-      if (!isOnline) {
-        const token = await getFcmToken(receiverId);
-        await sendPush(token, senderName, msg.text || "Новое сообщение",
-          { type: "message", senderId, chatId: chatPath });
-      }
+      // Всегда шлём push — Android сам не покажет если чат открыт
+      const token = await getFcmToken(receiverId);
+      await sendPush(token, senderName, msg.text || "Новое сообщение",
+        { type: "message", senderId, chatId: chatPath });
     }
   }, (err) => console.error("Ошибка слушателя сообщений:", err));
 }
